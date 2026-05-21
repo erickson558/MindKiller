@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(move /Y dist\\\\process_killer_gui.exe .)",
+      "Bash(rmdir /s /q build dist)",
+      "Bash(del /f /q process_killer_gui.spec)",
+      "Bash(dir *.exe)"
+    ]
+  }
+}
