@@ -1,0 +1,26 @@
+# Build artifacts
+dist/
+build/
+*.spec
+*.exe
+
+# Runtime files (auto-generated, user-specific)
+config.json
+log.txt
+debug.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user

@@ -1,0 +1,73 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Extract version from source ────────────────────────────────────
+      - name: Extract version
+        id: version
+        shell: python
+        run: |
+          import re, os
+          with open('process_killer_gui.py', 'r', encoding='utf-8') as f:
+              src = f.read()
+          match = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', src)
+          version = match.group(1) if match else '0.0.0'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'version={version}\n')
+          print(f'Detected version: {version}')
+
+      # ── 5. Build EXE with PyInstaller ──────────────────────────────────────
+      - name: Build EXE
+        run: |
+          $ico = Get-ChildItem -Filter "*.ico" | Select-Object -First 1
+          $icoFlag = if ($ico) { "--icon=$($ico.Name)" } else { "" }
+          pyinstaller --onefile --windowed --name process_killer_gui $icoFlag process_killer_gui.py
+        shell: pwsh
+
+      # ── 6. Create GitHub Release ───────────────────────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: MindKiller v${{ steps.version.outputs.version }}
+          body: |
+            ## MindKiller v${{ steps.version.outputs.version }}
+
+            ### Download
+            - **Windows EXE** — `process_killer_gui.exe` (no install needed)
+
+            ### Run from source
+            ```bash
+            pip install psutil
+            python process_killer_gui.py
+            ```
+
+            ---
+            Created by Synyster Rick · Apache License 2.0
+          files: dist/process_killer_gui.exe
+          draft: false
+          prerelease: ${{ startsWith(steps.version.outputs.version, '0.') }}
