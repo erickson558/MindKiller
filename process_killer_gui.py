@@ -12,7 +12,10 @@ import ctypes
 import json
 import logging
 import os
+import csv
+import io
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import threading
 import time
@@ -276,26 +279,84 @@ class ProcessManager:
         return name.lower() in PROTECTED_PROCESSES
 
     def find(self, term: str) -> List[Dict]:
-        """Return list of process dicts whose name contains *term*."""
-        term_l  = term.lower().strip()
-        results = []
+        """Return list of process dicts whose name contains *term*.
 
-        for proc in psutil.process_iter(['pid', 'name', 'exe', 'status']):
+        Fast path: one tasklist snapshot (single OS call) to filter by name,
+        then psutil only for the few matches to get exe + status.
+        Falls back to pure psutil if tasklist is unavailable.
+        """
+        term_l = term.lower().strip()
+        try:
+            return self._find_fast(term_l)
+        except Exception as exc:
+            self._log.warning(f"Fast search failed ({exc}), falling back to psutil")
+            return self._find_psutil(term_l)
+
+    def _find_fast(self, term_l: str) -> List[Dict]:
+        """tasklist snapshot + parallel psutil only for non-protected matches."""
+        # CREATE_NO_WINDOW (0x08000000) prevents a cmd flash on Windows
+        raw = subprocess.check_output(
+            ['tasklist', '/FO', 'CSV', '/NH'],
+            text=True,
+            creationflags=0x08000000,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Phase 1: fast name filter from snapshot
+        candidates = []
+        for row in csv.reader(io.StringIO(raw)):
+            if not row:
+                continue
+            name, pid_s = row[0].strip(), row[1].strip()
+            if term_l not in name.lower():
+                continue
+            protected = self.is_protected(name)
+            candidates.append({'name': name, 'pid': int(pid_s), 'protected': protected})
+
+        # Phase 2: resolve exe + status in parallel — skip protected (always AccessDenied)
+        def resolve(c: Dict) -> Dict:
+            exe, status = 'N/A', 'unknown'
+            if not c['protected']:
+                try:
+                    p      = psutil.Process(c['pid'])
+                    exe    = p.exe() or 'N/A'
+                    status = p.status()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            return {**c, 'exe': exe, 'status': status}
+
+        results = []
+        with ThreadPoolExecutor(max_workers=min(16, len(candidates) or 1)) as ex:
+            for item in ex.map(resolve, candidates):
+                results.append(item)
+
+        self._log.info(f"Search '{term_l}': {len(results)} result(s) [fast]")
+        return results
+
+    def _find_psutil(self, term_l: str) -> List[Dict]:
+        """Pure psutil fallback — slower but cross-platform."""
+        results = []
+        for proc in psutil.process_iter(['pid', 'name', 'status']):
             try:
                 info = proc.info
                 name = (info.get('name') or '').strip()
-                if term_l in name.lower():
-                    results.append({
-                        'name':      name,
-                        'pid':       info['pid'],
-                        'exe':       info.get('exe') or 'N/A',
-                        'status':    info.get('status') or 'unknown',
-                        'protected': self.is_protected(name),
-                    })
+                if term_l not in name.lower():
+                    continue
+                exe = 'N/A'
+                try:
+                    exe = proc.exe() or 'N/A'
+                except (psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+                results.append({
+                    'name':      name,
+                    'pid':       info['pid'],
+                    'exe':       exe,
+                    'status':    info.get('status') or 'unknown',
+                    'protected': self.is_protected(name),
+                })
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
-
-        self._log.info(f"Search '{term}': {len(results)} result(s)")
+        self._log.info(f"Search '{term_l}': {len(results)} result(s) [psutil]")
         return results
 
     def kill(self, pid: int, name: str) -> Tuple[bool, str]:
